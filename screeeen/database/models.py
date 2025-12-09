@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, JSON, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, JSON, ForeignKey, Text, CheckConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -119,13 +119,17 @@ class Subscription(Base):
 class PriceAlert(Base):
     """Ценовые алерты"""
     __tablename__ = 'price_alerts'
+    __table_args__ = (
+        CheckConstraint("condition IN ('above', 'below')", name='check_condition'),
+        CheckConstraint("status IN ('active', 'triggered', 'cancelled')", name='check_status'),
+    )
     
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
     symbol = Column(String(20), nullable=False, index=True)
     target_price = Column(Float, nullable=False)
-    condition = Column(String(10), nullable=False)  # 'above' or 'below'
-    status = Column(String(20), default='active')  # active, triggered, cancelled
+    condition = Column(String(10), nullable=False)  # 'above' or 'below' - validated by constraint
+    status = Column(String(20), default='active')  # 'active', 'triggered', 'cancelled' - validated by constraint
     created_at = Column(DateTime, default=datetime.utcnow)
     triggered_at = Column(DateTime, nullable=True)
     

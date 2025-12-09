@@ -24,8 +24,16 @@ class RateLimiter:
         self.minute_history: Dict[str, list] = defaultdict(list)
         self.second_history: Dict[str, list] = defaultdict(list)
         
-        # Блокировки для синхронизации
-        self.locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Блокировки для синхронизации - создаем заранее
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._locks_lock = asyncio.Lock()
+    
+    async def _get_lock(self, key: str) -> asyncio.Lock:
+        """Получить или создать lock для ключа безопасно"""
+        async with self._locks_lock:
+            if key not in self._locks:
+                self._locks[key] = asyncio.Lock()
+            return self._locks[key]
     
     async def acquire(self, key: str = "default") -> None:
         """
@@ -35,7 +43,8 @@ class RateLimiter:
         Args:
             key: Ключ для отдельного rate limiting (например, для разных API)
         """
-        async with self.locks[key]:
+        lock = await self._get_lock(key)
+        async with lock:
             current_time = time.time()
             
             # Очищаем старые записи

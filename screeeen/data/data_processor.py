@@ -280,18 +280,21 @@ class DataProcessor:
         """
         Расчет OBV - On Balance Volume (NEW)
         Показывает кумулятивное давление покупки/продажи
+        Использует векторизованные операции для производительности
         """
-        obv = pd.Series(index=df.index, dtype=float)
+        # Определяем направление цены
+        price_direction = df['close'].diff()
+        
+        # Создаем множители: +1 для роста, -1 для падения, 0 для без изменений
+        volume_multiplier = np.where(price_direction > 0, 1,
+                                     np.where(price_direction < 0, -1, 0))
+        
+        # Умножаем объем на направление и считаем кумулятивную сумму
+        obv = (df['volume'] * volume_multiplier).cumsum()
+        
+        # Устанавливаем первое значение равным объему
         obv.iloc[0] = df['volume'].iloc[0]
-
-        for i in range(1, len(df)):
-            if df['close'].iloc[i] > df['close'].iloc[i - 1]:
-                obv.iloc[i] = obv.iloc[i - 1] + df['volume'].iloc[i]
-            elif df['close'].iloc[i] < df['close'].iloc[i - 1]:
-                obv.iloc[i] = obv.iloc[i - 1] - df['volume'].iloc[i]
-            else:
-                obv.iloc[i] = obv.iloc[i - 1]
-
+        
         return obv
 
     @staticmethod

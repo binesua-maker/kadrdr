@@ -53,13 +53,21 @@ class SystemMonitor:
     def get_disk_usage(self) -> Dict:
         """Получить использование диска"""
         try:
-            disk = psutil.disk_usage('/')
+            # Определяем путь в зависимости от ОС
+            import platform
+            if platform.system() == 'Windows':
+                disk_path = 'C:\\'
+            else:
+                disk_path = '/'
+            
+            disk = psutil.disk_usage(disk_path)
             
             return {
                 'total_gb': round(disk.total / 1024 / 1024 / 1024, 2),
                 'used_gb': round(disk.used / 1024 / 1024 / 1024, 2),
                 'free_gb': round(disk.free / 1024 / 1024 / 1024, 2),
-                'percent': round(disk.percent, 2)
+                'percent': round(disk.percent, 2),
+                'path': disk_path
             }
         except Exception as e:
             logger.error(f"Ошибка получения информации о диске: {e}")
