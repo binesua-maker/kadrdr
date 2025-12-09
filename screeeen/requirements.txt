@@ -1,0 +1,27 @@
+# Telegram Bot
+python-telegram-bot==21.0.1
+python-dotenv==1.0.0
+
+# Binance & Trading
+ccxt>=4.0.0
+python-binance==1.0.19
+
+# Data Processing
+pandas>=2.2.0
+numpy>=1.26.0
+pandas-ta>=0.3.14b0
+
+# Visualization
+matplotlib>=3.8.0
+mplfinance>=0.12.10b0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Utils
+python-dateutil>=2.8.0
+pytz>=2024.0
+requests>=2.31.0
+
+# Logging
+loguru>=0.7.0
