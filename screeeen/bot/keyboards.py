@@ -10,7 +10,8 @@ class BotKeyboards:
         keyboard = [
             [KeyboardButton("🔍 Запустить скан"), KeyboardButton("⚙️ Настройки")],
             [KeyboardButton("📊 История сигналов"), KeyboardButton("📈 Статистика")],
-            [KeyboardButton("❓ Помощь"), KeyboardButton("ℹ️ О боте")]
+            [KeyboardButton("🌟 Расширенные функции"), KeyboardButton("❓ Помощь")],
+            [KeyboardButton("ℹ️ О боте")]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -134,5 +135,103 @@ class BotKeyboards:
                 [InlineKeyboardButton("▶️ Запустить сканирование", callback_data="start_scan")],
                 [InlineKeyboardButton("⚙️ Настроить параметры", callback_data="settings_signals")]
             ]
+        
+        return InlineKeyboardMarkup(keyboard)
+    
+    # === NEW v2.0 Keyboards ===
+    
+    @staticmethod
+    def get_advanced_menu() -> InlineKeyboardMarkup:
+        """Расширенное меню v2.0 функций"""
+        keyboard = [
+            [InlineKeyboardButton("🔔 Мои алерты", callback_data="menu_alerts")],
+            [InlineKeyboardButton("💼 Портфель", callback_data="menu_portfolio")],
+            [InlineKeyboardButton("📌 Подписки", callback_data="menu_subscriptions")],
+            [InlineKeyboardButton("📊 MTF Анализ", callback_data="menu_mtf")],
+            [InlineKeyboardButton("🔗 Корреляция", callback_data="menu_correlation")],
+            [InlineKeyboardButton("💰 Funding Rates", callback_data="menu_funding")],
+            [InlineKeyboardButton("⏰ Расписание", callback_data="menu_schedule")],
+            [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_alert_actions_keyboard(alert_id: int) -> InlineKeyboardMarkup:
+        """Действия с алертом"""
+        keyboard = [
+            [InlineKeyboardButton("🗑 Удалить алерт", callback_data=f"delete_alert:{alert_id}")],
+            [InlineKeyboardButton("◀️ К списку алертов", callback_data="menu_alerts")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_portfolio_actions_keyboard(position_id: int) -> InlineKeyboardMarkup:
+        """Действия с позицией в портфеле"""
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить P&L", callback_data=f"refresh_position:{position_id}")],
+            [InlineKeyboardButton("🗑 Удалить позицию", callback_data=f"delete_position:{position_id}")],
+            [InlineKeyboardButton("◀️ К портфелю", callback_data="menu_portfolio")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_subscription_keyboard(symbols: List[str] = None) -> InlineKeyboardMarkup:
+        """Управление подписками"""
+        if symbols is None:
+            symbols = []
+        
+        keyboard = []
+        
+        # Популярные монеты для подписки
+        popular = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+        
+        for symbol in popular:
+            is_subscribed = symbol in symbols
+            prefix = "✅" if is_subscribed else "➕"
+            action = "unsub" if is_subscribed else "sub"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{prefix} {symbol}",
+                    callback_data=f"{action}:{symbol}"
+                )
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton("📝 Показать мои подписки", callback_data="show_subscriptions")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("◀️ Назад", callback_data="advanced_menu")
+        ])
+        
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_mtf_timeframes_keyboard() -> InlineKeyboardMarkup:
+        """Выбор монеты для MTF анализа"""
+        keyboard = [
+            [InlineKeyboardButton("BTC/USDT", callback_data="mtf:BTC/USDT")],
+            [InlineKeyboardButton("ETH/USDT", callback_data="mtf:ETH/USDT")],
+            [InlineKeyboardButton("BNB/USDT", callback_data="mtf:BNB/USDT")],
+            [InlineKeyboardButton("📝 Ввести свой символ", callback_data="mtf_custom")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="advanced_menu")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_schedule_keyboard(active_schedule: bool = False) -> InlineKeyboardMarkup:
+        """Управление расписанием"""
+        keyboard = []
+        
+        if active_schedule:
+            keyboard.append([InlineKeyboardButton("🔴 Остановить автосканирование", callback_data="stop_schedule")])
+        else:
+            keyboard.extend([
+                [InlineKeyboardButton("30 минут", callback_data="schedule:30:15m")],
+                [InlineKeyboardButton("1 час", callback_data="schedule:60:15m")],
+                [InlineKeyboardButton("4 часа", callback_data="schedule:240:1h")],
+                [InlineKeyboardButton("24 часа", callback_data="schedule:1440:4h")]
+            ])
+        
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="advanced_menu")])
         
         return InlineKeyboardMarkup(keyboard)

@@ -7,7 +7,10 @@ import json
 import numpy as np
 import pandas as pd
 
-from database.models import Base, User, UserSettings, Signal, ScanHistory
+from database.models import (
+    Base, User, UserSettings, Signal, ScanHistory,
+    Subscription, PriceAlert, Position, ScanSchedule, SignalPerformance
+)
 from config.settings import DATABASE_URL
 
 
@@ -384,5 +387,251 @@ class DatabaseManager:
         except Exception as e:
             session.rollback()
             logger.error(f"Ошибка очистки старых сигналов: {e}")
+        finally:
+            session.close()
+
+    # === Subscription operations ===
+
+    async def add_subscription(self, telegram_id: int, symbol: str) -> bool:
+        """Добавить подписку на монету"""
+        session = self.get_session()
+        try:
+            user = session.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                return False
+
+            # Проверяем, нет ли уже подписки
+            existing = session.query(Subscription).filter(
+                Subscription.user_id == user.id,
+                Subscription.symbol == symbol
+            ).first()
+
+            if existing:
+                return True  # Уже подписан
+
+            subscription = Subscription(user_id=user.id, symbol=symbol)
+            session.add(subscription)
+            session.commit()
+            return True
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка добавления подписки: {e}")
+            return False
+        finally:
+            session.close()
+
+    async def remove_subscription(self, telegram_id: int, symbol: str) -> bool:
+        """Удалить подписку"""
+        session = self.get_session()
+        try:
+            user = session.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                return False
+
+            deleted = session.query(Subscription).filter(
+                Subscription.user_id == user.id,
+                Subscription.symbol == symbol
+            ).delete()
+
+            session.commit()
+            return deleted > 0
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка удаления подписки: {e}")
+            return False
+        finally:
+            session.close()
+
+    async def get_user_subscriptions(self, telegram_id: int) -> List[str]:
+        """Получить подписки пользователя"""
+        session = self.get_session()
+        try:
+            user = session.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                return []
+
+            subscriptions = session.query(Subscription).filter(
+                Subscription.user_id == user.id
+            ).all()
+
+            return [sub.symbol for sub in subscriptions]
+
+        finally:
+            session.close()
+
+    # === Schedule operations ===
+
+    async def create_schedule(
+        self,
+        telegram_id: int,
+        interval_minutes: int,
+        timeframe: str
+    ) -> Optional[int]:
+        """Создать расписание автоматического сканирования"""
+        session = self.get_session()
+        try:
+            user = session.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                return None
+
+            # Отключаем старые расписания
+            session.query(ScanSchedule).filter(
+                ScanSchedule.user_id == user.id,
+                ScanSchedule.enabled == True
+            ).update({'enabled': False})
+
+            # Создаем новое
+            schedule = ScanSchedule(
+                user_id=user.id,
+                interval_minutes=interval_minutes,
+                timeframe=timeframe,
+                enabled=True,
+                next_run=datetime.utcnow()
+            )
+
+            session.add(schedule)
+            session.commit()
+            session.refresh(schedule)
+            return schedule.id
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка создания расписания: {e}")
+            return None
+        finally:
+            session.close()
+
+    async def get_active_schedules(self) -> List[Dict]:
+        """Получить все активные расписания"""
+        session = self.get_session()
+        try:
+            schedules = session.query(ScanSchedule).filter(
+                ScanSchedule.enabled == True
+            ).all()
+
+            result = []
+            for sched in schedules:
+                user = session.query(User).filter_by(id=sched.user_id).first()
+                if user:
+                    result.append({
+                        'id': sched.id,
+                        'user_id': user.telegram_id,
+                        'interval_minutes': sched.interval_minutes,
+                        'timeframe': sched.timeframe,
+                        'next_run': sched.next_run
+                    })
+
+            return result
+
+        finally:
+            session.close()
+
+    async def update_schedule_run(self, schedule_id: int, next_run: datetime):
+        """Обновить время следующего запуска"""
+        session = self.get_session()
+        try:
+            schedule = session.query(ScanSchedule).filter_by(id=schedule_id).first()
+            if schedule:
+                schedule.last_run = datetime.utcnow()
+                schedule.next_run = next_run
+                session.commit()
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка обновления расписания: {e}")
+        finally:
+            session.close()
+
+    # === Signal Performance operations ===
+
+    async def create_signal_performance(self, signal_id: int, symbol: str, signal_type: str, entry_price: float):
+        """Создать запись для отслеживания эффективности сигнала"""
+        session = self.get_session()
+        try:
+            perf = SignalPerformance(
+                signal_id=signal_id,
+                symbol=symbol,
+                signal_type=signal_type,
+                entry_price=entry_price
+            )
+
+            session.add(perf)
+            session.commit()
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка создания записи эффективности: {e}")
+        finally:
+            session.close()
+
+    async def update_signal_performance(
+        self,
+        signal_id: int,
+        price_1h: float = None,
+        price_4h: float = None,
+        price_24h: float = None
+    ):
+        """Обновить результаты сигнала"""
+        session = self.get_session()
+        try:
+            perf = session.query(SignalPerformance).filter_by(signal_id=signal_id).first()
+            if not perf:
+                return
+
+            if price_1h is not None:
+                perf.price_after_1h = price_1h
+                perf.change_1h = ((price_1h - perf.entry_price) / perf.entry_price) * 100
+
+            if price_4h is not None:
+                perf.price_after_4h = price_4h
+                perf.change_4h = ((price_4h - perf.entry_price) / perf.entry_price) * 100
+
+            if price_24h is not None:
+                perf.price_after_24h = price_24h
+                perf.change_24h = ((price_24h - perf.entry_price) / perf.entry_price) * 100
+
+                # Определяем outcome на основе 24h результата
+                if abs(perf.change_24h) >= 5:  # Значительное движение
+                    perf.outcome = 'success' if perf.change_24h > 0 else 'failed'
+                else:
+                    perf.outcome = 'pending'
+
+            perf.checked_at = datetime.utcnow()
+            session.commit()
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка обновления эффективности: {e}")
+        finally:
+            session.close()
+
+    async def get_signal_performance_stats(self) -> Dict:
+        """Получить общую статистику эффективности сигналов"""
+        session = self.get_session()
+        try:
+            total = session.query(func.count(SignalPerformance.id)).scalar()
+            successful = session.query(func.count(SignalPerformance.id)).filter(
+                SignalPerformance.outcome == 'success'
+            ).scalar()
+            failed = session.query(func.count(SignalPerformance.id)).filter(
+                SignalPerformance.outcome == 'failed'
+            ).scalar()
+
+            avg_change_1h = session.query(func.avg(SignalPerformance.change_1h)).scalar()
+            avg_change_4h = session.query(func.avg(SignalPerformance.change_4h)).scalar()
+            avg_change_24h = session.query(func.avg(SignalPerformance.change_24h)).scalar()
+
+            return {
+                'total': total or 0,
+                'successful': successful or 0,
+                'failed': failed or 0,
+                'success_rate': (successful / total * 100) if total > 0 else 0,
+                'avg_change_1h': round(avg_change_1h, 2) if avg_change_1h else 0,
+                'avg_change_4h': round(avg_change_4h, 2) if avg_change_4h else 0,
+                'avg_change_24h': round(avg_change_24h, 2) if avg_change_24h else 0
+            }
+
         finally:
             session.close()

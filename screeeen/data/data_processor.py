@@ -1,60 +1,194 @@
+"""
+Data Processor - Полностью переписанная версия v2.0
+Обработка и анализ рыночных данных с расширенными индикаторами
+"""
 import pandas as pd
 import numpy as np
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from loguru import logger
 import asyncio
 from datetime import datetime, timedelta
+import ccxt
+
+from utils.rate_limiter import binance_limiter
+from utils.cache import cache
 
 
 class DataProcessor:
     """Обработка и нормализация данных с Binance"""
 
     def __init__(self):
-        self.cache = {}
-        self.cache_timeout = 60  # секунды
+        self.exchange = None
+        self._initialized = False
+
+    def _init_exchange(self):
+        """Ленивая инициализация биржи"""
+        if not self._initialized:
+            try:
+                self.exchange = ccxt.binance({
+                    'enableRateLimit': True,
+                    'options': {'defaultType': 'spot'}
+                })
+                self._initialized = True
+                logger.info("DataProcessor: Exchange инициализирована")
+            except Exception as e:
+                logger.error(f"Ошибка инициализации биржи: {e}")
+
+    async def get_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = '15m',
+        limit: int = 200,
+        use_cache: bool = True
+    ) -> Optional[pd.DataFrame]:
+        """
+        Получить OHLCV данные с кэшированием
+        
+        Args:
+            symbol: Символ монеты
+            timeframe: Таймфрейм
+            limit: Количество свечей
+            use_cache: Использовать кэш
+        
+        Returns:
+            DataFrame с OHLCV данными
+        """
+        # Проверяем кэш
+        cache_key = f"ohlcv:{symbol}:{timeframe}:{limit}"
+        
+        if use_cache:
+            cached = cache.get(cache_key)
+            if cached:
+                try:
+                    return pd.DataFrame(cached)
+                except Exception as e:
+                    logger.debug(f"Ошибка чтения из кэша: {e}")
+
+        # Ленивая инициализация
+        if not self._initialized:
+            self._init_exchange()
+
+        if not self.exchange:
+            return None
+
+        try:
+            # Rate limiting
+            await binance_limiter.acquire('binance')
+
+            # Получаем данные
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+            if not ohlcv:
+                return None
+
+            # Преобразуем в DataFrame
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+
+            # Преобразуем timestamp
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+            # Сохраняем в кэш
+            if use_cache:
+                cache.set(cache_key, df.to_dict('records'), ttl=60)
+
+            return df
+
+        except Exception as e:
+            logger.error(f"Ошибка получения OHLCV для {symbol}: {e}")
+            return None
+
+    async def get_ticker(self, symbol: str, use_cache: bool = True) -> Optional[Dict]:
+        """Получить тикер с кэшированием"""
+        cache_key = f"ticker:{symbol}"
+
+        if use_cache:
+            cached = cache.get(cache_key)
+            if cached:
+                return cached
+
+        if not self._initialized:
+            self._init_exchange()
+
+        if not self.exchange:
+            return None
+
+        try:
+            await binance_limiter.acquire('binance')
+            ticker = self.exchange.fetch_ticker(symbol)
+
+            if use_cache:
+                cache.set(cache_key, ticker, ttl=10)
+
+            return ticker
+
+        except Exception as e:
+            logger.error(f"Ошибка получения тикера для {symbol}: {e}")
+            return None
 
     def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Добавить технические индикаторы к DataFrame"""
+        """
+        Добавить расширенный набор технических индикаторов
+        Включая все стандартные + новые: Stochastic RSI, OBV, VWAP
+        """
         if df is None or len(df) < 20:
             return df
 
         try:
-            # Simple Moving Averages
+            # === Moving Averages ===
             df['sma_20'] = df['close'].rolling(window=20).mean()
             df['sma_50'] = df['close'].rolling(window=50).mean()
             df['sma_200'] = df['close'].rolling(window=200).mean()
 
-            # Exponential Moving Averages
             df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
             df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
             df['ema_55'] = df['close'].ewm(span=55, adjust=False).mean()
 
-            # RSI
+            # === RSI ===
             df['rsi'] = self.calculate_rsi(df['close'], period=14)
 
-            # MACD
+            # === Stochastic RSI (NEW) ===
+            stoch_rsi = self.calculate_stochastic_rsi(df['close'])
+            df['stoch_rsi_k'] = stoch_rsi['k']
+            df['stoch_rsi_d'] = stoch_rsi['d']
+
+            # === MACD ===
             macd_data = self.calculate_macd(df['close'])
             df['macd'] = macd_data['macd']
             df['macd_signal'] = macd_data['signal']
             df['macd_histogram'] = macd_data['histogram']
 
-            # Bollinger Bands
+            # === Bollinger Bands ===
             bb_data = self.calculate_bollinger_bands(df['close'])
             df['bb_upper'] = bb_data['upper']
             df['bb_middle'] = bb_data['middle']
             df['bb_lower'] = bb_data['lower']
 
-            # ATR (Average True Range)
+            # === ATR ===
             df['atr'] = self.calculate_atr(df)
 
-            # Volume indicators
+            # === Volume Indicators ===
             df['volume_sma'] = df['volume'].rolling(window=20).mean()
             df['volume_ratio'] = df['volume'] / df['volume_sma']
 
-            # Stochastic
+            # === OBV - On Balance Volume (NEW) ===
+            df['obv'] = self.calculate_obv(df)
+
+            # === VWAP - Volume Weighted Average Price (NEW) ===
+            df['vwap'] = self.calculate_vwap(df)
+
+            # === Stochastic ===
             stoch_data = self.calculate_stochastic(df)
             df['stoch_k'] = stoch_data['k']
             df['stoch_d'] = stoch_data['d']
+
+            # === ADX - Average Directional Index ===
+            adx_data = self.calculate_adx(df)
+            df['adx'] = adx_data['adx']
+            df['plus_di'] = adx_data['plus_di']
+            df['minus_di'] = adx_data['minus_di']
 
             return df
 
@@ -72,6 +206,27 @@ class DataProcessor:
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         return rsi
+
+    @staticmethod
+    def calculate_stochastic_rsi(series: pd.Series, period: int = 14, smooth_k: int = 3, smooth_d: int = 3) -> Dict:
+        """
+        Расчет Stochastic RSI (NEW)
+        Более чувствительный индикатор перекупленности/перепроданности
+        """
+        # Сначала рассчитываем RSI
+        rsi = DataProcessor.calculate_rsi(series, period)
+
+        # Stochastic применяем к RSI
+        rsi_min = rsi.rolling(window=period).min()
+        rsi_max = rsi.rolling(window=period).max()
+
+        stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min)
+
+        # Сглаживание
+        k = stoch_rsi.rolling(window=smooth_k).mean() * 100
+        d = k.rolling(window=smooth_d).mean()
+
+        return {'k': k, 'd': d}
 
     @staticmethod
     def calculate_macd(series: pd.Series, fast=12, slow=26, signal=9) -> Dict:
@@ -121,6 +276,38 @@ class DataProcessor:
         return atr
 
     @staticmethod
+    def calculate_obv(df: pd.DataFrame) -> pd.Series:
+        """
+        Расчет OBV - On Balance Volume (NEW)
+        Показывает кумулятивное давление покупки/продажи
+        Использует векторизованные операции для производительности
+        """
+        # Определяем направление цены
+        price_direction = df['close'].diff()
+        
+        # Создаем множители: +1 для роста, -1 для падения, 0 для без изменений
+        volume_multiplier = np.where(price_direction > 0, 1,
+                                     np.where(price_direction < 0, -1, 0))
+        
+        # Умножаем объем на направление и считаем кумулятивную сумму
+        obv = (df['volume'] * volume_multiplier).cumsum()
+        
+        # Устанавливаем первое значение равным объему
+        obv.iloc[0] = df['volume'].iloc[0]
+        
+        return obv
+
+    @staticmethod
+    def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+        """
+        Расчет VWAP - Volume Weighted Average Price (NEW)
+        Средняя цена, взвешенная по объему
+        """
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        vwap = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+        return vwap
+
+    @staticmethod
     def calculate_stochastic(df: pd.DataFrame, k_period=14, d_period=3) -> Dict:
         """Расчет Stochastic Oscillator"""
         low_min = df['low'].rolling(window=k_period).min()
@@ -131,190 +318,214 @@ class DataProcessor:
 
         return {'k': k, 'd': d}
 
-    def find_support_resistance(self, df: pd.DataFrame, num_levels: int = 5) -> Dict[str, List[float]]:
-        """Поиск уровней поддержки и сопротивления"""
-        levels = {'support': [], 'resistance': []}
+    @staticmethod
+    def calculate_adx(df: pd.DataFrame, period: int = 14) -> Dict:
+        """Расчет ADX - Average Directional Index"""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+
+        # True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Directional Movement
+        up_move = high - high.shift()
+        down_move = low.shift() - low
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+
+        # Smoothed TR and DM
+        atr = tr.rolling(window=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+
+        # ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+
+        return {
+            'adx': adx,
+            'plus_di': plus_di,
+            'minus_di': minus_di
+        }
+
+    def calculate_pivot_points(self, df: pd.DataFrame) -> Dict:
+        """
+        Расчет Pivot Points (NEW)
+        Классические уровни поддержки и сопротивления
+        """
+        if len(df) < 1:
+            return {}
+
+        # Берем последнюю свечу
+        last = df.iloc[-1]
+        high = last['high']
+        low = last['low']
+        close = last['close']
+
+        # Pivot Point
+        pivot = (high + low + close) / 3
+
+        # Поддержки
+        s1 = 2 * pivot - high
+        s2 = pivot - (high - low)
+        s3 = low - 2 * (high - pivot)
+
+        # Сопротивления
+        r1 = 2 * pivot - low
+        r2 = pivot + (high - low)
+        r3 = high + 2 * (pivot - low)
+
+        return {
+            'pivot': pivot,
+            'r1': r1,
+            'r2': r2,
+            'r3': r3,
+            's1': s1,
+            's2': s2,
+            's3': s3
+        }
+
+    def determine_trend(self, df: pd.DataFrame) -> Dict:
+        """
+        Определение тренда (NEW улучшенная версия)
+        
+        Returns:
+            Словарь с информацией о тренде
+        """
+        if df is None or len(df) < 50:
+            return {'trend': 'unknown', 'strength': 0}
 
         try:
-            # Находим локальные минимумы и максимумы
-            window = 10
-            df['local_min'] = df['low'].rolling(window=window * 2 + 1, center=True).min()
-            df['local_max'] = df['high'].rolling(window=window * 2 + 1, center=True).max()
+            last = df.iloc[-1]
 
-            # Уровни поддержки
-            support_levels = df[df['low'] == df['local_min']]['low'].values
-            support_levels = np.unique(np.round(support_levels, 2))
+            # Проверяем MA
+            ma_trend = 'neutral'
+            if pd.notna(last['ema_21']) and pd.notna(last['ema_55']):
+                if last['close'] > last['ema_21'] > last['ema_55']:
+                    ma_trend = 'uptrend'
+                elif last['close'] < last['ema_21'] < last['ema_55']:
+                    ma_trend = 'downtrend'
 
-            # Уровни сопротивления
-            resistance_levels = df[df['high'] == df['local_max']]['high'].values
-            resistance_levels = np.unique(np.round(resistance_levels, 2))
-
-            # Группируем близкие уровни
-            support_levels = self._cluster_levels(support_levels, num_levels)
-            resistance_levels = self._cluster_levels(resistance_levels, num_levels)
-
-            levels['support'] = sorted(support_levels)[:num_levels]
-            levels['resistance'] = sorted(resistance_levels, reverse=True)[:num_levels]
-
-        except Exception as e:
-            logger.error(f"Ошибка поиска уровней: {e}")
-
-        return levels
-
-    @staticmethod
-    def _cluster_levels(levels: np.ndarray, num_clusters: int) -> List[float]:
-        """Кластеризация близких уровней"""
-        if len(levels) == 0:
-            return []
-
-        # Фильтруем нулевые и отрицательные значения
-        levels = levels[levels > 0]
-
-        if len(levels) == 0:
-            return []
-
-        # Простая кластеризация по близости
-        sorted_levels = np.sort(levels)
-        clusters = []
-        current_cluster = [sorted_levels[0]]
-
-        for level in sorted_levels[1:]:
-            try:
-                # Проверяем на валидность значений
-                if level <= 0 or current_cluster[-1] <= 0:
-                    current_cluster = [level]
-                    continue
-
-                # Вычисляем относительную разницу
-                relative_diff = abs(level - current_cluster[-1]) / abs(current_cluster[-1])
-
-                if relative_diff < 0.01:  # 1% разница
-                    current_cluster.append(level)
+            # Проверяем ADX для силы тренда
+            trend_strength = 0
+            if 'adx' in df.columns and pd.notna(last['adx']):
+                adx_value = last['adx']
+                if adx_value > 50:
+                    trend_strength = 3  # Very strong
+                elif adx_value > 25:
+                    trend_strength = 2  # Strong
+                elif adx_value > 15:
+                    trend_strength = 1  # Weak
                 else:
-                    # Сохраняем среднее значение кластера
-                    cluster_mean = np.mean(current_cluster)
-                    if cluster_mean > 0:  # Проверяем что среднее валидно
-                        clusters.append(cluster_mean)
-                    current_cluster = [level]
-            except (ZeroDivisionError, ValueError, RuntimeWarning) as e:
-                logger.debug(f"Пропускаем невалидный уровень: {level}")
-                current_cluster = [level]
-                continue
+                    trend_strength = 0  # No trend
 
-        # Добавляем последний кластер
-        if current_cluster:
-            cluster_mean = np.mean(current_cluster)
-            if cluster_mean > 0:
-                clusters.append(cluster_mean)
+            # Определяем направление по DI
+            trend_direction = 'neutral'
+            if 'plus_di' in df.columns and 'minus_di' in df.columns:
+                if pd.notna(last['plus_di']) and pd.notna(last['minus_di']):
+                    if last['plus_di'] > last['minus_di']:
+                        trend_direction = 'bullish'
+                    else:
+                        trend_direction = 'bearish'
 
-        # Возвращаем только валидные уровни
-        valid_clusters = [c for c in clusters if c > 0 and not np.isnan(c) and not np.isinf(c)]
+            # Комбинируем результаты
+            if ma_trend == 'uptrend' and trend_direction == 'bullish':
+                final_trend = 'strong_uptrend'
+            elif ma_trend == 'uptrend':
+                final_trend = 'uptrend'
+            elif ma_trend == 'downtrend' and trend_direction == 'bearish':
+                final_trend = 'strong_downtrend'
+            elif ma_trend == 'downtrend':
+                final_trend = 'downtrend'
+            else:
+                final_trend = 'sideways'
 
-        return valid_clusters[:num_clusters]
-
-    def calculate_price_change(self, df: pd.DataFrame, periods: List[int] = [1, 24, 168]) -> Dict:
-        """Расчет изменения цены за разные периоды"""
-        changes = {}
-
-        if df is None or len(df) == 0:
-            return changes
-
-        current_price = df['close'].iloc[-1]
-
-        for period in periods:
-            if len(df) > period:
-                old_price = df['close'].iloc[-period]
-                if old_price > 0:  # Проверка деления на ноль
-                    change = ((current_price - old_price) / old_price) * 100
-                    changes[f'{period}h'] = round(change, 2)
-
-        return changes
-
-    def detect_volume_anomaly(self, df: pd.DataFrame, threshold: float = 2.0) -> Optional[Dict]:
-        """Определение аномальных объемов"""
-        if len(df) < 20:
-            return None
-
-        current_volume = df['volume'].iloc[-1]
-        avg_volume = df['volume'].iloc[-20:-1].mean()
-
-        # Проверка на валидность
-        if avg_volume == 0 or pd.isna(avg_volume) or pd.isna(current_volume):
-            return None
-
-        if current_volume > avg_volume * threshold:
             return {
-                'current_volume': float(current_volume),
-                'average_volume': float(avg_volume),
-                'ratio': float(current_volume / avg_volume),
-                'is_anomaly': True
+                'trend': final_trend,
+                'strength': trend_strength,
+                'ma_trend': ma_trend,
+                'adx': last.get('adx', 0) if pd.notna(last.get('adx')) else 0
             }
 
-        return None
-
-    async def get_cached_data(self, key: str) -> Optional[any]:
-        """Получить данные из кэша"""
-        if key in self.cache:
-            data, timestamp = self.cache[key]
-            if datetime.now() - timestamp < timedelta(seconds=self.cache_timeout):
-                return data
-            else:
-                del self.cache[key]
-        return None
-
-    async def set_cached_data(self, key: str, data: any):
-        """Сохранить данные в кэш"""
-        self.cache[key] = (data, datetime.now())
-
-    def normalize_timeframe(self, tf: str) -> str:
-        """Нормализация таймфрейма к формату CCXT"""
-        mapping = {
-            '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
-            '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w'
-        }
-        return mapping.get(tf.lower(), '15m')
-
-    def clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Очистка DataFrame от невалидных значений"""
-        if df is None or len(df) == 0:
-            return df
-
-        try:
-            # Заменяем inf на NaN
-            df = df.replace([np.inf, -np.inf], np.nan)
-
-            # Удаляем строки с NaN в критичных колонках
-            critical_cols = ['open', 'high', 'low', 'close', 'volume']
-            df = df.dropna(subset=critical_cols)
-
-            # Убираем отрицательные значения цен
-            for col in critical_cols:
-                if col in df.columns:
-                    df = df[df[col] > 0]
-
-            return df
-
         except Exception as e:
-            logger.error(f"Ошибка очистки DataFrame: {e}")
-            return df
+            logger.error(f"Ошибка определения тренда: {e}")
+            return {'trend': 'unknown', 'strength': 0}
 
-    def validate_data(self, df: pd.DataFrame) -> bool:
-        """Валидация данных"""
-        if df is None or len(df) == 0:
-            return False
+    async def get_market_overview(self, symbols: List[str], timeframe: str = '15m') -> Dict:
+        """
+        Получить обзор рынка (NEW)
+        Анализ нескольких монет для общей картины
+        
+        Returns:
+            Сводка по рынку
+        """
+        overview = {
+            'total_symbols': len(symbols),
+            'bullish_count': 0,
+            'bearish_count': 0,
+            'neutral_count': 0,
+            'avg_rsi': 0,
+            'high_volume_count': 0,
+            'timestamp': datetime.utcnow().isoformat()
+        }
 
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        rsi_values = []
+        
+        for symbol in symbols[:20]:  # Ограничим для производительности
+            try:
+                df = await self.get_ohlcv(symbol, timeframe, limit=50)
+                if df is None or len(df) < 20:
+                    continue
 
-        # Проверяем наличие всех колонок
-        if not all(col in df.columns for col in required_cols):
-            return False
+                df = self.add_technical_indicators(df)
+                last = df.iloc[-1]
 
-        # Проверяем на NaN
-        if df[required_cols].isnull().any().any():
-            return False
+                # Определяем тренд
+                trend_info = self.determine_trend(df)
+                
+                if 'uptrend' in trend_info['trend']:
+                    overview['bullish_count'] += 1
+                elif 'downtrend' in trend_info['trend']:
+                    overview['bearish_count'] += 1
+                else:
+                    overview['neutral_count'] += 1
 
-        # Проверяем на положительные значения
-        if (df[required_cols] <= 0).any().any():
-            return False
+                # RSI
+                if pd.notna(last['rsi']):
+                    rsi_values.append(last['rsi'])
 
-        return True
+                # Объем
+                if last['volume_ratio'] > 2:
+                    overview['high_volume_count'] += 1
+
+            except Exception as e:
+                logger.debug(f"Ошибка анализа {symbol}: {e}")
+                continue
+
+        # Средний RSI
+        if rsi_values:
+            overview['avg_rsi'] = round(sum(rsi_values) / len(rsi_values), 2)
+
+        # Рыночное настроение
+        total_directional = overview['bullish_count'] + overview['bearish_count']
+        if total_directional > 0:
+            bullish_pct = (overview['bullish_count'] / total_directional) * 100
+            
+            if bullish_pct > 70:
+                overview['market_sentiment'] = 'bullish'
+            elif bullish_pct < 30:
+                overview['market_sentiment'] = 'bearish'
+            else:
+                overview['market_sentiment'] = 'mixed'
+        else:
+            overview['market_sentiment'] = 'neutral'
+
+        return overview
